@@ -1,0 +1,357 @@
+{
+  "name": "todo-backend",
+  "version": "1.0.0",
+  "description": "Small to-do app: Express server + SQLite database",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "express": "^4.19.2"
+  }
+}
+// ============ BACKEND: Express server + SQLite database ============
+
+// require() loads a library (like "import" in other languages).
+const express = require("express");            // web server framework
+const Database = require("better-sqlite3");    // SQLite database driver
+const path = require("path");                  // helps build file paths safely
+
+const app = express();                         // create the server application
+const PORT = process.env.PORT || 3000;         // use the host port if given, else 3000
+
+// ---------- DATABASE ----------
+// Opens (or creates) a file called todo.db next to this script.
+const db = new Database(path.join(__dirname, "todo.db"));
+
+// This is plain SQL, which you already know.
+// IF NOT EXISTS means: only create the table the first time.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,  -- unique id, the database numbers it
+    text       TEXT    NOT NULL,                   -- the task text
+    done       INTEGER NOT NULL DEFAULT 0,         -- SQLite has no boolean: 0 = false, 1 = true
+    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// Prepared statements: SQL with ? placeholders. The values are passed separately,
+// which protects you from SQL injection. NEVER build SQL by joining strings with user input.
+const listTasks  = db.prepare("SELECT id, text, done FROM tasks ORDER BY id");
+const insertTask = db.prepare("INSERT INTO tasks (text) VALUES (?)");
+const getTask    = db.prepare("SELECT id, text, done FROM tasks WHERE id = ?");
+const setDone    = db.prepare("UPDATE tasks SET done = ? WHERE id = ?");
+const removeTask = db.prepare("DELETE FROM tasks WHERE id = ?");
+
+// Convert a database row (done = 0 or 1) into what the frontend expects (true or false).
+function toTask(row) {
+  return { id: row.id, text: row.text, done: row.done === 1 };
+}
+
+// ---------- MIDDLEWARE (code that runs on every request first) ----------
+app.use(express.json());                                    // lets us read JSON sent by the frontend
+app.use(express.static(path.join(__dirname, "public")));    // serve the frontend files from /public
+
+// ---------- API ROUTES ----------
+// Each route = an HTTP method + a URL. This pattern is called a REST API.
+
+// READ all tasks -> like SELECT
+app.get("/api/tasks", (req, res) => {
+  res.json(listTasks.all().map(toTask));                    // .all() returns every matching row
+});
+
+// CREATE a task -> like INSERT
+app.post("/api/tasks", (req, res) => {
+  const text = typeof req.body.text === "string" ? req.body.text.trim() : "";
+
+  // VALIDATE: never trust data from the browser.
+  if (text === "" || text.length > 200) {
+    return res.status(400).json({ error: "Task text must be 1 to 200 characters." });
+  }
+
+  const info = insertTask.run(text);                        // .run() executes a write
+  const created = getTask.get(info.lastInsertRowid);        // .get() returns one row
+  res.status(201).json(toTask(created));                    // 201 = "created"
+});
+
+// UPDATE a task -> like UPDATE
+app.patch("/api/tasks/:id", (req, res) => {
+  const id = Number(req.params.id);                         // :id in the URL arrives as text
+  if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id." });
+  if (typeof req.body.done !== "boolean") {
+    return res.status(400).json({ error: "done must be true or false." });
+  }
+
+  const info = setDone.run(req.body.done ? 1 : 0, id);      // true/false -> 1/0
+  if (info.changes === 0) return res.status(404).json({ error: "Task not found." });
+
+  res.json(toTask(getTask.get(id)));
+});
+
+// DELETE a task -> like DELETE
+app.delete("/api/tasks/:id", (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id." });
+
+  const info = removeTask.run(id);
+  if (info.changes === 0) return res.status(404).json({ error: "Task not found." });
+
+  res.status(204).end();                                    // 204 = "done, nothing to send back"
+});
+
+// ---------- START ----------
+app.listen(PORT, () => {
+  console.log("Server running at http://localhost:" + PORT);
+});
+<!DOCTYPE html>
+<!-- Tells the browser this is a modern HTML5 page -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- Makes the page fit phone screens properly -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>To-do list with backend</title>
+
+  <style>
+    /* ============ CSS STARTS HERE ============ */
+
+    /* CSS variables: define colors once, reuse everywhere with var(--name). */
+    :root {
+      --bg: #f6f7f9;        /* page background */
+      --card: #ffffff;      /* white card */
+      --text: #1d2330;      /* main text color */
+      --muted: #6b7385;     /* lighter grey text */
+      --accent: #2f5bea;    /* blue for buttons */
+      --line: #e1e4ea;      /* thin border lines */
+      --done: #9aa1b2;      /* color of finished tasks */
+      box-sizing: border-box;
+      padding-top: env(safe-area-inset-top, 0px);       /* keeps content below phone status bar */
+      padding-bottom: env(safe-area-inset-bottom, 0px); /* keeps content above phone home bar */
+    }
+
+    /* Dark mode: if the device is set to dark, swap the variable values. */
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #14171f; --card: #1d212c; --text: #e8eaf0;
+        --muted: #98a0b3; --accent: #6f93ff; --line: #2c3240; --done: #6b7285;
+        color-scheme: dark;
+      }
+    }
+
+    /* * means "every element". Include padding in width so sizes are predictable. */
+    * { box-sizing: border-box; }
+
+    /* body: the whole visible page. Flexbox centers the card horizontally. */
+    body {
+      margin: 0;                         /* remove the default browser gap */
+      background: var(--bg);             /* use the variable defined above */
+      color: var(--text);
+      font-family: system-ui, sans-serif;/* use the device font */
+      display: flex;                     /* turn on flexbox */
+      justify-content: center;           /* center children left-right */
+      padding: 24px 16px;                /* space around the card */
+    }
+
+    /* .app: the white card that holds everything. Class selectors start with a dot. */
+    .app {
+      width: 100%;                       /* take full width, but... */
+      max-width: 480px;                  /* ...never wider than 480px */
+      background: var(--card);
+      border: 1px solid var(--line);     /* thin border: width, style, color */
+      border-radius: 14px;               /* rounded corners */
+      padding: 24px;                     /* space inside the card (box model) */
+      align-self: flex-start;            /* stick to the top, do not stretch tall */
+    }
+
+    h1 { margin: 0 0 4px; font-size: 24px; }   /* heading: no top gap, small bottom gap */
+    .count { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+
+    /* .add-row: input and button side by side using flexbox. */
+    .add-row { display: flex; gap: 8px; margin-bottom: 20px; }
+
+    input[type="text"] {                /* attribute selector: only text inputs */
+      flex: 1;                           /* input grows to fill leftover space */
+      padding: 10px 12px;
+      font-size: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    input[type="text"]:focus {           /* :focus applies while you are typing in it */
+      outline: 2px solid var(--accent);
+    }
+
+    button {
+      padding: 10px 16px;
+      font-size: 16px;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;                   /* hand cursor on hover */
+    }
+    button:hover { opacity: 0.88; }      /* :hover applies when the mouse is over it */
+
+    ul { list-style: none; margin: 0; padding: 0; }   /* remove bullets and default indent */
+
+    /* Each task row: checkbox, text, delete button. */
+    li {
+      display: flex;
+      align-items: center;               /* vertically center the row content */
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    li span { flex: 1; word-break: break-word; }   /* text takes the middle space */
+
+    /* This class is added by JavaScript when a task is finished. */
+    li.done span { text-decoration: line-through; color: var(--done); }
+
+    /* Small grey delete button: overrides the main button style. */
+    li button { background: transparent; color: var(--muted); padding: 4px 8px; }
+
+    .empty { color: var(--muted); text-align: center; padding: 16px 0; }
+
+    /* Responsive: on very small screens, stack input and button vertically. */
+    @media (max-width: 360px) {
+      .add-row { flex-direction: column; }
+    }
+    /* ============ CSS ENDS HERE ============ */
+  </style>
+</head>
+
+<body>
+  <!-- ============ HTML STARTS HERE: the structure ============ -->
+  <main class="app">                          <!-- the card; class links it to the CSS above -->
+    <h1>My tasks</h1>                         <!-- page title -->
+    <p class="count" id="count"></p>          <!-- JS fills this with "2 of 5 done"; id lets JS find it -->
+
+    <div class="add-row">                     <!-- row holding the input and the button -->
+      <input type="text" id="taskInput" placeholder="What needs doing?" aria-label="New task">
+      <button id="addBtn">Add task</button>   <!-- JS listens for clicks on this -->
+    </div>
+
+    <ul id="list"></ul>                       <!-- empty list: JS creates the <li> items inside -->
+  </main>
+  <!-- ============ HTML ENDS HERE ============ -->
+
+  <script>
+    // ============ FRONTEND JAVASCRIPT (now talks to the backend) ============
+
+    const input = document.querySelector("#taskInput");  // the text box
+    const addBtn = document.querySelector("#addBtn");    // the Add button
+    const list = document.querySelector("#list");        // the <ul> list
+    const count = document.querySelector("#count");      // the "x of y done" text
+
+    // The array now only mirrors what is in the database. The database is the source of truth.
+    let tasks = [];
+
+    // Helper: send a request to the backend and return the JSON answer.
+    // async/await = "wait for the server to reply before moving on".
+    async function api(url, options) {
+      const response = await fetch(url, options);                 // send the HTTP request
+      if (!response.ok) {                                         // 400, 404, 500 etc.
+        const problem = await response.json().catch(() => ({}));  // try to read the error message
+        throw new Error(problem.error || "Request failed");
+      }
+      if (response.status === 204) return null;                   // 204 means no body to read
+      return response.json();                                     // turn the reply text into an object
+    }
+
+    // READ: ask the server for all tasks (backend runs SELECT), then redraw.
+    async function loadTasks() {
+      try {
+        tasks = await api("/api/tasks");                          // GET is the default method
+        render();
+      } catch (error) {
+        count.textContent = "Could not reach the server.";
+        console.log(error);
+      }
+    }
+
+    // Draw the list from the tasks array (same idea as before).
+    function render() {
+      list.innerHTML = "";
+
+      if (tasks.length === 0) {
+        list.innerHTML = '<p class="empty">No tasks yet. Add your first one above.</p>';
+      }
+
+      tasks.forEach((task) => {
+        const li = document.createElement("li");
+        if (task.done) li.classList.add("done");
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = task.done;
+        checkbox.setAttribute("aria-label", "Mark done");
+        checkbox.addEventListener("change", async () => {
+          try {
+            // UPDATE: PATCH changes part of an existing record (backend runs UPDATE).
+            await api("/api/tasks/" + task.id, {
+              method: "PATCH",                                    // which action
+              headers: { "Content-Type": "application/json" },    // tell the server we send JSON
+              body: JSON.stringify({ done: checkbox.checked })    // the data, as text
+            });
+            await loadTasks();                                    // reload from the database
+          } catch (error) {
+            alert(error.message);
+            await loadTasks();                                    // reset the checkbox to the real state
+          }
+        });
+
+        const span = document.createElement("span");
+        span.textContent = task.text;
+
+        const del = document.createElement("button");
+        del.textContent = "Delete";
+        del.addEventListener("click", async () => {
+          try {
+            // DELETE: remove the record (backend runs DELETE).
+            await api("/api/tasks/" + task.id, { method: "DELETE" });
+            await loadTasks();
+          } catch (error) {
+            alert(error.message);
+          }
+        });
+
+        li.append(checkbox, span, del);
+        list.appendChild(li);
+      });
+
+      const doneCount = tasks.filter((t) => t.done).length;
+      count.textContent = doneCount + " of " + tasks.length + " done";
+    }
+
+    // CREATE: send the new text to the server (backend runs INSERT).
+    async function addTask() {
+      const text = input.value.trim();
+      if (text === "") return;
+
+      try {
+        await api("/api/tasks", {
+          method: "POST",                                         // POST = create something new
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text })
+        });
+        input.value = "";
+        input.focus();
+        await loadTasks();                                        // the new task now has a database id
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    addBtn.addEventListener("click", addTask);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") addTask();
+    });
+
+    loadTasks();                                                  // load data when the page opens
+
+    // ============ END ============
+  </script>
+</body>
+</html>
